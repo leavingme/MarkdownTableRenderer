@@ -1,7 +1,7 @@
 /**
  * @name MarkdownTableRenderer
  * @description Render markdown tables in Discord messages (including history)
- * @version 1.4.0
+ * @version 1.5.0
  */
 
 module.exports = class MarkdownTableRenderer {
@@ -83,29 +83,57 @@ module.exports = class MarkdownTableRenderer {
     }
 
     /**
-     * 向上遍历 DOM，找到当前消息所在的列表项（<li>），
-     * 再从前一条消息中找最后一张由本插件渲染的 <table>。
+     * 从当前消息所在 <li> 向前搜索，找到最近一张本插件渲染的 <table>。
+     * 最多向前搜索 MAX_STEPS 条消息（不因中间有文字而中止，避免跨过文字消息漏找）。
+     * 用列数匹配来判断是否是同一张表格的续行，避免误连接到无关表格。
      */
-    findPreviousTable(el) {
-        // 找到最近的 li 祖先（Discord 每条消息是一个 li）
+    findPreviousTable(el, continuationText) {
+        // 解析续行文本的列数
+        const contCols = this.detectColumnCount(continuationText);
+
+        // 找到最近的 li 祖先
         let li = el;
         while (li && li.tagName !== "LI") {
             li = li.parentElement;
         }
         if (!li) return null;
 
-        // 向前扫描兄弟 li，找最近一条含有本插件渲染表格的消息
+        // 向前最多搜索 5 条消息
         let prev = li.previousElementSibling;
-        while (prev) {
+        let steps = 0;
+        while (prev && steps < 5) {
             const tables = prev.querySelectorAll("table[data-mtr]");
-            if (tables.length > 0) return tables[tables.length - 1];
-            // 如果前一条消息没有表格也没有任何内容（空白分隔行），继续往前
-            // 如果前一条消息有实质文字内容，则停止（不跨非表格消息拼接）
-            const content = prev.innerText?.trim();
-            if (content) break;
+            if (tables.length > 0) {
+                // 找列数匹配的表格（从最后一张开始往前找）
+                for (let t = tables.length - 1; t >= 0; t--) {
+                    const tableCols = this.getTableColCount(tables[t]);
+                    if (contCols === 0 || tableCols === 0 || contCols === tableCols) {
+                        return tables[t];
+                    }
+                }
+            }
             prev = prev.previousElementSibling;
+            steps++;
         }
         return null;
+    }
+
+    // 统计续行文本中各行的最大列数
+    detectColumnCount(text) {
+        const lines = text.split("\n").filter(l => this.isTableRowLine(l));
+        if (lines.length === 0) return 0;
+        return Math.max(...lines.map(line =>
+            line.split("|").map(c => c.trim()).filter((c, i, a) =>
+                !(c === "" && (i === 0 || i === a.length - 1))
+            ).length
+        ));
+    }
+
+    // 获取已渲染表格的列数（取第一行）
+    getTableColCount(table) {
+        const firstRow = table.querySelector("tr");
+        if (!firstRow) return 0;
+        return firstRow.querySelectorAll("th, td").length;
     }
 
     /**
@@ -269,7 +297,7 @@ module.exports = class MarkdownTableRenderer {
 
         // 情况 2：跨消息表格续行——当前消息全是无表头的数据行
         if (this.isTableContinuation(text)) {
-            const prevTable = this.findPreviousTable(el);
+            const prevTable = this.findPreviousTable(el, text);
             if (prevTable) {
                 this.appendRowsToTable(text, prevTable);
                 el.innerHTML = "";          // 清空，内容已合并到前一条消息的表格
