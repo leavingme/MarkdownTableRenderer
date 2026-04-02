@@ -1,7 +1,7 @@
 /**
  * @name MarkdownTableRenderer
  * @description Render markdown tables in Discord messages (including history)
- * @version 1.2.0
+ * @version 1.3.0
  */
 
 module.exports = class MarkdownTableRenderer {
@@ -51,24 +51,34 @@ module.exports = class MarkdownTableRenderer {
         );
     }
 
-    // 文本中是否含有合法的 Markdown 表格（当前行是表格行 + 下一行是分隔行）
+    // 找到从 startIndex 开始，第一个非空行的下标（找不到返回 -1）
+    nextNonEmpty(lines, startIndex) {
+        for (let j = startIndex; j < lines.length; j++) {
+            if (lines[j].trim() !== "") return j;
+        }
+        return -1;
+    }
+
+    // 文本中是否含有合法的 Markdown 表格
+    // 判断时跳过空行，兼容 Discord 消息分段导致行间插入空行的情况
     hasTable(text) {
         const lines = text.split("\n");
-        for (let i = 0; i + 1 < lines.length; i++) {
-            if (this.isTableRowLine(lines[i]) && this.isSeparatorLine(lines[i + 1])) {
-                return true;
-            }
+        for (let i = 0; i < lines.length; i++) {
+            if (!this.isTableRowLine(lines[i])) continue;
+            const j = this.nextNonEmpty(lines, i + 1);
+            if (j !== -1 && this.isSeparatorLine(lines[j])) return true;
         }
         return false;
     }
 
     /**
      * 将整段文本精确拆分为若干块：
-     * - 表格块：以"表格行 + 分隔行"开头的连续表格行
+     * - 表格块：以"表格行 + 分隔行"开头的连续表格行（行间空行被跳过）
      * - 文本块：其他所有行
      *
-     * 关键：只有"当前行满足表格行格式 且 下一行是分隔行"时，才认为表格开始。
-     * 这样可以避免普通文字（即便含有 | 字符）被误划入表格。
+     * 修复：Discord 消息分段时，行与行之间可能被插入空行（\n\n），
+     * 原来的逐行 lookahead 会在空行处中断，导致表格只渲染一半。
+     * 现在 lookahead 和行收集都会跳过空行。
      */
     splitBlocks(text) {
         const lines = text.split("\n");
@@ -76,32 +86,44 @@ module.exports = class MarkdownTableRenderer {
         let i = 0;
 
         while (i < lines.length) {
-            // 表格开始条件：当前行是表格行，且下一行是分隔行
-            if (
-                i + 1 < lines.length &&
-                this.isTableRowLine(lines[i]) &&
-                this.isSeparatorLine(lines[i + 1])
-            ) {
-                const tableLines = [];
-                // 收集所有连续的表格相关行（数据行 或 分隔行）
-                while (
-                    i < lines.length &&
-                    (this.isTableRowLine(lines[i]) || this.isSeparatorLine(lines[i]))
-                ) {
-                    tableLines.push(lines[i]);
-                    i++;
+            if (this.isTableRowLine(lines[i])) {
+                // 向前看：跳过空行，检查是否接着是分隔行
+                const j = this.nextNonEmpty(lines, i + 1);
+                if (j !== -1 && this.isSeparatorLine(lines[j])) {
+                    // 确认是表格，收集所有表格相关行，跳过中间的空行
+                    const tableLines = [];
+                    while (i < lines.length) {
+                        const trimmed = lines[i].trim();
+                        if (trimmed === "") {
+                            // 空行：向前看看下一个非空行是不是还是表格行，是则跳过，否则结束
+                            const next = this.nextNonEmpty(lines, i + 1);
+                            if (next !== -1 && (this.isTableRowLine(lines[next]) || this.isSeparatorLine(lines[next]))) {
+                                i++; // 跳过空行，继续收集
+                                continue;
+                            } else {
+                                break; // 空行之后不是表格行，表格结束
+                            }
+                        }
+                        if (this.isTableRowLine(lines[i]) || this.isSeparatorLine(lines[i])) {
+                            tableLines.push(lines[i]);
+                            i++;
+                        } else {
+                            break; // 非空、非表格行，表格结束
+                        }
+                    }
+                    blocks.push({ type: "table", content: tableLines.join("\n") });
+                    continue;
                 }
-                blocks.push({ type: "table", content: tableLines.join("\n") });
-            } else {
-                // 普通文字行：合并到上一个文字块，或新建文字块
-                const prev = blocks[blocks.length - 1];
-                if (prev && prev.type === "text") {
-                    prev.content += "\n" + lines[i];
-                } else {
-                    blocks.push({ type: "text", content: lines[i] });
-                }
-                i++;
             }
+
+            // 普通文字行：合并到上一个文字块，或新建文字块
+            const prev = blocks[blocks.length - 1];
+            if (prev && prev.type === "text") {
+                prev.content += "\n" + lines[i];
+            } else {
+                blocks.push({ type: "text", content: lines[i] });
+            }
+            i++;
         }
 
         return blocks;
